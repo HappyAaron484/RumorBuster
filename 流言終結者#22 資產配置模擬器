@@ -98,7 +98,7 @@ if __name__ == "__main__":
     #risk_level = "low_risk"  # 可以更改為 "medium_risk" 或 "high_risk"
     #risk_level = "medium_risk"
     risk_level = "high_risk"
-    invest_amount = 1000  
+    invest_amount = 100  
     start_date = "2020-01-01"  
     end_date = "2024-12-31"  
 
