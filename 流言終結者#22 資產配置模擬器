@@ -1,0 +1,119 @@
+import yfinance as yf
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def fetch_etf_data(tickers, start_date, end_date):
+    """ 從 Yahoo Finance 下載 ETF 歷史價格數據 """
+    data = yf.download(tickers, start=start_date, end=end_date, progress=False, auto_adjust=True)
+    return data["Close"]  
+
+def compute_max_drawdown(cumulative_returns):
+    """ 計算最大回撤 (MDD) """
+    peak = cumulative_returns.cummax()
+    drawdown = (cumulative_returns - peak) / peak
+    max_drawdown = drawdown.min()
+    return max_drawdown
+
+def compute_cagr(initial_value, final_value, start_date, end_date):
+    """ 計算年化報酬率 (CAGR) """
+    years = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days / 365.25
+    cagr = (final_value / initial_value) ** (1 / years) - 1
+    return cagr
+
+def simulate_dca(etf_weights, invest_amount, start_date, end_date):
+    tickers = list(etf_weights.keys())
+    prices = fetch_etf_data(tickers, start_date, end_date)
+
+    # 檢查價格數據是否有效
+    if prices.isnull().values.any():
+        print("Warning: Some price data is missing. Please check the tickers and date range.")
+        prices = prices.fillna(method='ffill')  # 用前一個有效值填充缺失數據
+
+    # 生成每個月的第一個交易日
+    invest_dates = pd.date_range(start=start_date, end=end_date, freq='MS')  # 'MS' 代表每月的第一天
+
+    # 確保 invest_dates 只包含有數據的交易日
+    adjusted_invest_dates = []
+    for date in invest_dates:
+        first_trading_day = prices.index[(prices.index.month == date.month) & (prices.index.year == date.year)].min()
+        if pd.notna(first_trading_day):
+            adjusted_invest_dates.append(first_trading_day)
+        else:
+            print(f"Warning: No trading day found for {date}. Investment skipped.")
+            continue
+
+    holdings = {etf: 0 for etf in tickers}
+    total_invested = 0
+    portfolio_values = []
+
+    for date in adjusted_invest_dates:
+        total_invested += invest_amount  
+        for etf, weight in etf_weights.items():
+            price = prices.loc[date, etf]
+            if pd.notna(price):  # 確保價格有效
+                shares_to_buy = (invest_amount * weight) / price  
+                holdings[etf] += shares_to_buy  
+                #print(f"Date: {date}, ETF: {etf}, Price: {price}, Shares Bought: {shares_to_buy}")
+            else:
+                print(f"Warning: Price for {etf} on {date} is missing.")
+
+        current_value = sum(holdings[etf] * prices.loc[date, etf] for etf in tickers)
+        portfolio_values.append(current_value)
+
+    latest_prices = prices.iloc[-1]  
+    final_value = sum(holdings[etf] * latest_prices[etf] for etf in tickers)  
+    total_return = (final_value - total_invested) / total_invested if total_invested > 0 else 0
+
+    portfolio_series = pd.Series(portfolio_values, index=adjusted_invest_dates)
+    max_drawdown = compute_max_drawdown(portfolio_series)
+    cagr = compute_cagr(total_invested, final_value, start_date, end_date) if total_invested > 0 else 0
+
+    return {
+        "final_value": final_value,
+        "total_invested": total_invested,
+        "total_return": total_return,
+        "holdings": holdings,
+        "cagr": cagr,
+        "mdd": max_drawdown
+    }
+
+def plot_etf_performance(tickers, start_date, end_date):
+    """ 繪製 ETF 價格走勢 """
+    prices = fetch_etf_data(tickers, start_date, end_date)
+    prices.plot(figsize=(10, 5), title="ETF Price Performance")
+    plt.xlabel("Date")
+    plt.ylabel("Adjusted Close Price (USD)")
+    plt.legend(tickers)
+    plt.grid()
+    plt.show()
+
+if __name__ == "__main__":
+    # 定義 ETF 投資組合
+    ETF_PORTFOLIOS = {
+        "low_risk": {"SPY": 0.5, "IVV": 0.3, "VOO": 0.2},  
+        "medium_risk": {"QQQ": 0.6, "VTI": 0.4},      
+        "high_risk": {"ARKK": 0.7, "SOXX": 0.3}       
+    }
+
+    #risk_level = "low_risk"  # 可以更改為 "medium_risk" 或 "high_risk"
+    #risk_level = "medium_risk"
+    risk_level = "high_risk"
+    invest_amount = 1000  
+    start_date = "2020-01-01"  
+    end_date = "2024-12-31"  
+
+    etfs = ETF_PORTFOLIOS[risk_level]  
+    weights = etfs  # 使用定義的權重
+
+    result = simulate_dca(weights, invest_amount, start_date, end_date)
+
+    print("\n📈 **投資回測結果**")
+    print(f"🎯 投資標的: {', '.join(etfs.keys())}")
+    print(f"💰 總投入資金: ${result['total_invested']:.2f}")
+    print(f"🏦 最終市值: ${result['final_value']:.2f}")
+    print(f"📊 總報酬率: {result['total_return']*100:.2f}%")
+    print(f"📊 年化報酬率 (CAGR): {result['cagr']*100:.2f}%")
+    print(f"📉 最大回撤 (MDD): {result['mdd']*100:.2f}%")
+    print(f"📊 持有股數: {result['holdings']}")
+
+    plot_etf_performance(list(weights.keys()), start_date, end_date)
