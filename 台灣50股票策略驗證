@@ -1,0 +1,211 @@
+import pandas as pd
+import sqlite3
+import yfinance as yf
+import datetime as dt
+import os
+
+# 設定資料庫檔案
+db_file = "stocks_taiwan50.db"
+
+# 確保 SQLite 連接安全
+def get_db_connection():
+    return sqlite3.connect(db_file)
+
+# 初始化資料庫
+def initialize_database():
+    with get_db_connection() as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS stocks (
+                Date TEXT,
+                Stock TEXT,
+                Open REAL,
+                High REAL,
+                Low REAL,
+                Close REAL,
+                Volume INTEGER,
+                PRIMARY KEY (Date, Stock)
+            );
+        ''')
+        print("📌 資料庫已建立或已存在！")
+
+# 台灣 50 成分股（這裡僅保留部分股票）
+taiwan_50_stocks = [
+    "2308.TW", "2317.TW", "2327.TW", "2330.TW", "2352.TW",
+]
+
+# 下載歷史數據
+def download_stock_data():
+    with get_db_connection() as conn:
+        for stock in taiwan_50_stocks:
+            print(f"📥 下載 {stock} 的日 K 線資料...")
+            try:
+                # 使用全域設定的回測參數日期
+                stock_data = yf.download(stock, start=start_date, end=end_date, auto_adjust=False)
+
+                if stock_data.empty:
+                    print(f"⚠️ {stock} 無數據，跳過...")
+                    continue
+
+                stock_data.reset_index(inplace=True)  # 讓 Date 成為單獨欄位
+                stock_data["Date"] = stock_data["Date"].astype(str)
+                stock_data["Stock"] = stock
+
+                # 修正 MultiIndex 欄位（若有）
+                stock_data.columns = [col[0] if isinstance(col, tuple) else col for col in stock_data.columns]
+
+                # 只保留需要的欄位
+                stock_data = stock_data[["Date", "Stock", "Open", "High", "Low", "Close", "Volume"]]
+
+                # 清除舊數據，避免重複
+                conn.execute(f"DELETE FROM stocks WHERE Stock = '{stock}'")
+                stock_data.to_sql("stocks", conn, if_exists="append", index=False)
+                print(f"✅ {stock} 資料已更新。")
+            except Exception as e:
+                print(f"⚠️ 下載 {stock} 失敗: {e}")
+
+# 設定回測參數
+start_date = "2024-01-01"
+end_date = "2024-12-31"
+initial_capital = 10000000  # 初始資金 1000 萬
+
+# 讀取資料庫
+def load_stock_data():
+    with get_db_connection() as conn:
+        sql_query = f"SELECT * FROM stocks WHERE Date BETWEEN '{start_date}' AND '{end_date}'"
+        stocks_data = pd.read_sql_query(sql_query, conn)
+
+    if stocks_data.empty:
+        print("❌ 錯誤: stocks_data 為空，請確認數據下載是否成功。")
+        exit()
+
+    stocks_data["Date"] = pd.to_datetime(stocks_data["Date"])
+    return stocks_data
+
+# 計算布林通道
+def calculate_bollinger_bands(stocks_data):
+    stocks_data["SMA_20"] = stocks_data.groupby("Stock")["Close"].transform(lambda x: x.rolling(20).mean())
+    stocks_data["StdDev_20"] = stocks_data.groupby("Stock")["Close"].transform(lambda x: x.rolling(20).std())
+    stocks_data["Upper_Band"] = stocks_data["SMA_20"] + (2 * stocks_data["StdDev_20"])
+    stocks_data["Lower_Band"] = stocks_data["SMA_20"] - (2 * stocks_data["StdDev_20"])
+    return stocks_data
+
+# 產生交易訊號
+def generate_signals(stocks_data):
+    stocks_data["Signal"] = ""
+    stocks_data.loc[(stocks_data["Close"] > stocks_data["Upper_Band"]) & 
+                    (stocks_data["Close"].shift(1) <= stocks_data["Upper_Band"].shift(1)), "Signal"] = "Sell"
+    stocks_data.loc[(stocks_data["Close"] < stocks_data["Lower_Band"]) & 
+                    (stocks_data["Close"].shift(1) >= stocks_data["Lower_Band"].shift(1)), "Signal"] = "Buy"
+    return stocks_data
+
+# 回測與記錄每日、每月、每半年的投資組合狀況和損益
+def backtest(stocks_data):
+    portfolio = {}   # 使用 dict 來記錄持有的標的與股數，例如 {"2330.TW": 3000}
+    capital = initial_capital
+    daily_records = []  # 紀錄每日組合狀態
+
+    # 確保資料依日期排序
+    stocks_data = stocks_data.sort_values(by="Date")
+    unique_dates = stocks_data["Date"].unique()
+
+    for date in unique_dates:
+        # 當天所有資料
+        date_data = stocks_data[stocks_data["Date"] == date]
+        # 處理當天的交易訊號
+        signals_today = date_data[date_data["Signal"] != ""]
+        for idx, row in signals_today.iterrows():
+            stock = row["Stock"]
+            signal = row["Signal"]
+            close = row["Close"]
+            if signal == "Buy":
+                if capital >= close * 1000:
+                    shares_to_buy = (capital // (close * 1000)) * 1000
+                    transaction_cost = (close * shares_to_buy) * (0.1425 / 100)
+                    cost = close * shares_to_buy + transaction_cost
+                    if capital >= cost:
+                        capital -= cost
+                        portfolio[stock] = portfolio.get(stock, 0) + shares_to_buy
+                        print(f"{date.date()} 買進 {stock} {shares_to_buy} 股，價格 {close:.2f}")
+            elif signal == "Sell":
+                if stock in portfolio and portfolio[stock] > 0:
+                    shares_to_sell = portfolio[stock]
+                    tax_cost = (close * shares_to_sell) * (0.3 / 100)
+                    transaction_cost = (close * shares_to_sell) * (0.1425 / 100)
+                    proceeds = close * shares_to_sell - tax_cost - transaction_cost
+                    capital += proceeds
+                    print(f"{date.date()} 賣出 {stock} {shares_to_sell} 股，價格 {close:.2f}")
+                    portfolio[stock] = 0
+        # 清除持倉中數量為 0 的股票
+        portfolio = {k: v for k, v in portfolio.items() if v > 0}
+
+        # 計算當天持有組合的市值
+        day_portfolio_value = 0
+        positions_snapshot = {}
+        for stock, shares in portfolio.items():
+            # 嘗試從當天數據中取得該股票的收盤價，若無則設為 0
+            stock_data_today = date_data[date_data["Stock"] == stock]
+            if not stock_data_today.empty:
+                price = stock_data_today["Close"].iloc[0]
+            else:
+                price = 0
+            value = shares * price
+            positions_snapshot[stock] = {"shares": shares, "price": price, "value": value}
+            day_portfolio_value += value
+
+        total_value = capital + day_portfolio_value
+        daily_records.append({
+            "Date": date,
+            "Capital": capital,
+            "Portfolio_Value": day_portfolio_value,
+            "Total_Value": total_value,
+            "Positions": positions_snapshot
+        })
+
+    # 轉換每日記錄為 DataFrame
+    daily_df = pd.DataFrame(daily_records)
+    daily_df["Date"] = pd.to_datetime(daily_df["Date"])
+    daily_df = daily_df.sort_values("Date")
+
+    # -----------------------
+    # 計算每個月的持股狀況與損益
+    # -----------------------
+    daily_df["YearMonth"] = daily_df["Date"].dt.to_period("M")
+    # 以每月最後一天的狀態作為該月的狀態
+    monthly_df = daily_df.groupby("YearMonth").last().reset_index()
+    monthly_df["Monthly_PnL"] = monthly_df["Total_Value"].diff()
+
+    # -----------------------
+    # 計算每半年的持股狀況與損益
+    # -----------------------
+    # 自定半年度：1~6 月為上半年，7~12 月為下半年
+    daily_df["Half"] = daily_df["Date"].dt.month.apply(lambda m: 1 if m <= 6 else 2)
+    daily_df["Year"] = daily_df["Date"].dt.year
+    daily_df["YearHalf"] = daily_df["Year"].astype(str) + "-H" + daily_df["Half"].astype(str)
+    semiannual_df = daily_df.groupby("YearHalf").last().reset_index()
+    semiannual_df["Semiannual_PnL"] = semiannual_df["Total_Value"].diff()
+
+    return daily_df, monthly_df, semiannual_df, portfolio, capital
+
+# 主程序流程
+if __name__ == "__main__":
+    initialize_database()
+
+    if input("是否下載最新數據 (Y/N)? ").lower() == "y":
+        download_stock_data()
+
+    stocks_data = load_stock_data()
+    stocks_data = calculate_bollinger_bands(stocks_data)
+    stocks_data = generate_signals(stocks_data)
+
+    daily_df, monthly_df, semiannual_df, final_portfolio, final_capital = backtest(stocks_data)
+
+    print("\n📈 **回測結果**")
+    print(f"💰 最終剩餘資金: {final_capital:.2f}")
+    print(f"📊 最終持有股票: {final_portfolio}")
+
+    print("\n🗓 每月持股情況與損益：")
+    # 這裡顯示每月日期、總資產價值及該月損益（若有）
+    print(monthly_df[["YearMonth", "Total_Value", "Monthly_PnL"]])
+
+    print("\n🗓 每半年度持股情況與損益：")
+    print(semiannual_df[["YearHalf", "Total_Value", "Semiannual_PnL"]])
