@@ -9,7 +9,8 @@
 - 模擬定期定額投資，並計算最終市值、總投入資金和總報酬率。
 - 繪製 ETF 價格走勢圖。
 
-# 台灣50股票策略驗證 https://www.youtube.com/watch?v=s1_CWO-_kz4
+# 台灣50股票策略驗證 
+https://www.youtube.com/watch?v=s1_CWO-_kz4
 導入所需的模組
 建立SQLite資料庫連接
 定義策略起始日期和結束日期
